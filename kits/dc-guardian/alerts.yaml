@@ -1,0 +1,127 @@
+# DC Guardian — Alert Notification & Escalation Configuration
+# Defines how and where alerts are delivered, and escalation rules.
+
+# ---------------------------------------------------------------------------
+# Notification channels
+# ---------------------------------------------------------------------------
+notifications:
+  telegram:
+    enabled: true
+    bot_token: "${TELEGRAM_BOT_TOKEN}"       # Set via environment variable
+    chat_id: "${TELEGRAM_CHAT_ID}"           # Set via environment variable
+    template: >
+      🛡️ DC Guardian {{severity|upper}}
+      📍 {{node_name}}
+      ⏱ {{timestamp}}
+      
+      {{metric}} = {{value}} {{unit}}
+      Threshold: {{threshold}} {{unit}}
+      {{action}}
+      
+      {{#ack_url}}Ack: {{ack_url}}{{/ack_url}}
+    parse_mode: HTML
+
+  discord:
+    enabled: true
+    webhook_url: "${DISCORD_WEBHOOK_URL}"    # Set via environment variable
+    template: >
+      **🛡️ DC Guardian {{severity|upper}}**
+      **Location:** `{{node_name}}`
+      
+      `{{metric}} = {{value}} {{unit}}`
+      *Threshold: {{threshold}} {{unit}}*
+      
+      {{action}}
+      
+      {{#ack_url}}Ack: {{ack_url}}{{/ack_url}}
+    mentions:
+      warning: []
+      critical: ["@here"]
+
+  webhook:
+    enabled: true
+    url: "${WEBHOOK_URL}"                    # Generic webhook endpoint
+    method: POST
+    body: json
+    headers:
+      Content-Type: application/json
+      X-Source: dc-guardian
+    json_payload:
+      severity: "{{severity}}"
+      node: "{{node_name}}"
+      metric: "{{metric}}"
+      value: "{{value}}"
+      unit: "{{unit}}"
+      threshold: "{{threshold}}"
+      timestamp: "{{timestamp}}"
+      message: "{{action}}"
+      ack_url: "{{ack_url}}"
+
+  sms:
+    enabled: false
+    provider: twilio
+    account_sid: "${TWILIO_ACCOUNT_SID}"
+    auth_token: "${TWILIO_AUTH_TOKEN}"
+    from_number: "${TWILIO_FROM_NUMBER}"
+    to_numbers:
+      - "${ON_CALL_PHONE_1}"
+      - "${ON_CALL_PHONE_2}"
+    template: "DC Guardian CRITICAL: {{metric}}={{value}} at {{node_name}}"
+    # SMS is disabled by default due to per-message costs.
+    # Enable only for critical escalation in production.
+
+# ---------------------------------------------------------------------------
+# Escalation rules
+# ---------------------------------------------------------------------------
+escalation:
+  # Warning-level alerts repeat every 15 minutes if condition persists
+  warning_repeat_minutes: 15
+  warning_max_repeats: 96  # 24 hours max (96 × 15 min)
+
+  # Critical alerts repeat every 5 minutes
+  critical_repeat_minutes: 5
+  critical_max_repeats: 288  # 24 hours max (288 × 5 min)
+
+  # Critical alerts require manual acknowledgment
+  critical_requires_ack: true
+
+  # Escalation: if critical alert is not acknowledged within N minutes,
+  # escalate to the next tier (SMS, phone call, etc.)
+  escalation_tiers:
+    - after_minutes: 10
+      action: repeat_critical  # Continue repeating every 5 min
+    - after_minutes: 30
+      action: enable_sms       # Enable SMS channel for this alert
+      message: "UNACKNOWLEDGED CRITICAL: {{metric}}={{value}} at {{node_name}} for 30 min"
+    - after_minutes: 60
+      action: notify_secondary # Notify backup contact
+      message: "ESCALATED: {{metric}}={{value}} at {{node_name}} unacknowledged for 60 min"
+
+# ---------------------------------------------------------------------------
+# Silence / maintenance window configuration
+# ---------------------------------------------------------------------------
+maintenance:
+  # Scheduled maintenance suppresses alerts during window
+  windows:
+    - description: "Weekly sensor calibration"
+      schedule: "0 10 * * 1"       # Every Monday at 10:00
+      duration_minutes: 60
+      suppress_levels: [warning, critical]
+
+  # Manual maintenance mode (activated via picclaw)
+  manual_mode:
+    suppress_levels: [warning, critical]
+    max_duration_minutes: 120       # Auto-expire after 2 hours
+
+# ---------------------------------------------------------------------------
+# Logging and data retention
+# ---------------------------------------------------------------------------
+logging:
+  metrics:
+    enabled: true
+    backend: influxdb              # Optional: configure InfluxDB for metric storage
+    retention_days: 365
+  alerts:
+    enabled: true
+    backend: local                 # Stores in PicClaw local database
+    retention_days: 365

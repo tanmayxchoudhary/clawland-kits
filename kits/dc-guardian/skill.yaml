@@ -1,0 +1,291 @@
+# DC Guardian — PicClaw Skill Configuration
+# This skill configures the LicheeRV Nano for data center night-shift monitoring.
+# Install with: picclaw skill install ./kits/dc-guardian
+
+name: dc-guardian
+version: 1.0.0
+description: >
+  Data center night-shift monitoring kit. Replaces a $48K/yr human operator.
+  Monitors temperature (×2), humidity, spot temp, water leak, smoke/gas,
+  door state (×2), and branch circuit current draw.
+
+agent: picclaw
+runtime: linux  # LicheeRV Nano runs PicClaw Linux
+
+# ---------------------------------------------------------------------------
+# Scheduled polling — every 60 seconds
+# ---------------------------------------------------------------------------
+triggers:
+  - cron: "*/1 * * * *"
+    description: >
+      Poll all sensors every 60 seconds. This matches typical DC monitoring
+      granularity; alarms are near-instant via GPIO interrupt on discrete sensors.
+    action: poll_all
+
+  - event: sensor.leak
+    description: GPIO20 falling/rising edge (leak detected/cleared)
+    action: handle_leak
+
+  - event: sensor.smoke
+    description: GPIO21 rising edge (smoke/gas detected)
+    action: handle_smoke
+
+  - event: sensor.door_rack
+    description: GPIO22 state change (rack door opened/closed)
+    action: handle_door
+
+  - event: sensor.door_room
+    description: GPIO23 state change (room door opened/closed)
+    action: handle_door
+
+# ---------------------------------------------------------------------------
+# GPIO pin configuration
+# ---------------------------------------------------------------------------
+gpio:
+  # DHT22 sensors — use bit-bang protocol on these pins
+  dht22_room:
+    pin: GPIO17
+    direction: in
+    pull: up
+    protocol: dht22
+
+  dht22_hvac:
+    pin: GPIO18
+    direction: in
+    pull: up
+    protocol: dht22
+
+  # DS18B20 — 1-Wire protocol
+  ds18b20_spot:
+    pin: GPIO19
+    direction: in
+    pull: up
+    protocol: w1
+    resistor_pullup: 4.7kΩ  # CRITICAL: must have external 4.7kΩ pull-up
+
+  # Digital discrete inputs — active HIGH
+  leak:
+    pin: GPIO20
+    direction: in
+    pull: down           # Pull LOW so floating = no leak
+    edge: both           # Trigger on both rising and falling
+    active_high: true    # HIGH = wet
+
+  smoke:
+    pin: GPIO21
+    direction: in
+    pull: down
+    edge: rising         # Only trigger on detection transition
+    active_high: true    # HIGH = smoke/gas detected
+    debounce_ms: 50      # 50ms debounce to filter sensor noise
+
+  # Reed switch — active LOW (switch shorts to GND when magnet present)
+  door_rack:
+    pin: GPIO22
+    direction: in
+    pull: up             # Pull HIGH; magnet presence pulls LOW
+    edge: both
+    active_high: false   # LOW = door closed (magnet present)
+
+  door_room:
+    pin: GPIO23
+    direction: in
+    pull: up
+    edge: both
+    active_high: false
+
+  # Outputs
+  buzzer:
+    pin: GPIO24
+    direction: out
+    initial: low
+    drive: transistor     # NPN 2N2222 — GPIO drives base through 1kΩ
+    max_current_mA: 150
+
+  led_red:
+    pin: GPIO25
+    direction: out
+    initial: low
+    drive: gpio_direct    # Via 330Ω resistor
+
+  led_green:
+    pin: GPIO26
+    direction: out
+    initial: low
+    drive: gpio_direct    # Via 330Ω resistor
+
+# ---------------------------------------------------------------------------
+# I2C device configuration
+# ---------------------------------------------------------------------------
+i2c:
+  bus: 0
+  devices:
+    ads1115:
+      address: "0x48"
+      type: ads1115
+      range: "±4.096V"    # Default ±4.096V (SCT-013-030 output ~1V max)
+      samples_per_second: 860
+      channels:
+        current_branch:
+          channel: 0       # A0
+          label: "UPS branch current"
+          unit: "A"
+          conversion: >
+            (adc_raw - 16384) * (30.0 / 8192) if adc_raw > 16384
+            else (16384 - adc_raw) * (30.0 / 8192)
+
+# ---------------------------------------------------------------------------
+# Sensor → metric mapping for logging and alerting
+# ---------------------------------------------------------------------------
+metrics:
+  - name: dc_guardian.temperature.room
+    source: dht22_room
+    field: temperature_c
+    unit: °C
+
+  - name: dc_guardian.humidity.room
+    source: dht22_room
+    field: humidity_percent
+    unit: "%RH"
+
+  - name: dc_guardian.temperature.hvac
+    source: dht22_hvac
+    field: temperature_c
+    unit: °C
+
+  - name: dc_guardian.humidity.hvac
+    source: dht22_hvac
+    field: humidity_percent
+    unit: "%RH"
+
+  - name: dc_guardian.temperature.spot
+    source: ds18b20_spot
+    field: temperature_c
+    unit: °C
+
+  - name: dc_guardian.current.branch
+    source: ads1115.current_branch
+    unit: A
+
+  - name: dc_guardian.status.leak
+    source: leak
+    field: active
+    type: boolean
+
+  - name: dc_guardian.status.smoke
+    source: smoke
+    field: active
+    type: boolean
+
+  - name: dc_guardian.status.door_rack
+    source: door_rack
+    field: active
+    type: boolean
+
+  - name: dc_guardian.status.door_room
+    source: door_room
+    field: active
+    type: boolean
+
+# ---------------------------------------------------------------------------
+# Alert thresholds (core logic)
+# ---------------------------------------------------------------------------
+thresholds:
+  temperature_c:
+    warning_high: 30
+    critical_high: 35
+    warning_low: 15
+    hysteresis: 0.5       # Must drop 0.5°C below threshold before clearing
+
+  humidity_percent:
+    warning_high: 65
+    critical_high: 75
+    warning_low: 20       # Low humidity → possible static risk
+    hysteresis: 3
+
+  current_amp:
+    warning_high: 16
+    critical_high: 20
+    hysteresis: 0.5
+
+  leak:
+    critical_when: true
+
+  smoke:
+    critical_when: true
+
+  door_open_seconds:
+    warning: 60            # 1 minute → warning
+    critical: 300          # 5 minutes → critical
+
+# ---------------------------------------------------------------------------
+# Automated actions triggered by state transitions
+# ---------------------------------------------------------------------------
+actions:
+  on_normal:
+    - log_data: dc_guardian.reading
+    - set_gpio:
+        pin: GPIO26      # Green LED ON
+        state: high
+    - set_gpio:
+        pin: GPIO25      # Red LED OFF
+        state: low
+
+  on_warning:
+    - send_alert:
+        severity: warning
+        channels: [telegram, discord, webhook]
+        rate_limit: 15    # minutes between repeated warnings
+    - set_gpio:
+        pin: GPIO25      # Red LED ON
+        state: high
+    - set_gpio:
+        pin: GPIO26      # Green LED OFF
+        state: low
+
+  on_critical:
+    - send_alert:
+        severity: critical
+        channels: [telegram, discord, webhook, sms]  # sms via gateway
+        rate_limit: 5     # minutes between repeats
+        requires_ack: true
+    - set_gpio:
+        pin: GPIO24      # Buzzer ON
+        state: high
+    - set_gpio:
+        pin: GPIO25      # Red LED ON
+        state: high
+    - set_gpio:
+        pin: GPIO26      # Green LED OFF
+        state: low
+
+  on_critical_cleared:
+    - send_alert:
+        severity: info
+        message: "{{node_name}}: Critical alert cleared — {{metric}} back to normal"
+    - set_gpio:
+        pin: GPIO24      # Buzzer OFF
+        state: low
+
+# ---------------------------------------------------------------------------
+# Metadata for the Clawland ecosystem
+# ---------------------------------------------------------------------------
+metadata:
+  website: https://github.com/Clawland-AI/clawland-kits/tree/main/kits/dc-guardian
+  replaces: "$48K/yr datacenter night shift"
+  kit_cost_usd: 86.58
+  board: LicheeRV Nano
+  sensors_count: 8        # 2×DHT22 + DS18B20 + leak + MQ-2 + 2×reed + current
+  zones:
+    - room_ambient
+    - hvac_outlet
+    - cooling_loop
+    - floor_drain
+    - rack_door
+    - room_door
+    - electrical_panel
+  network_required: true  # Requires Wi-Fi or Ethernet for alert dispatch
+  power_requirements:
+    voltage: "5V DC"
+    current: "2A typical (burst 3A on boot)"
+    connector: USB-C

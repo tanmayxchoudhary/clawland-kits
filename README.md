@@ -14,7 +14,7 @@ Clawland Kits provides **ready-to-build hardware recipes** that pair Claw agents
 
 | Kit | Sensors | Board | Total Cost | Replaces |
 |-----|---------|-------|-----------|----------|
-| **DC Guardian** | DHT22 + Smoke + Water | LicheeRV-Nano | ~$88 | $48K/yr datacenter night shift |
+| [**DC Guardian**](kits/dc-guardian/) | DHT22 + Smoke + Water | LicheeRV-Nano | ~$86.58 | $48K/yr datacenter night shift |
 | **Aqua Watch** | pH + DO + Temp + Turbidity | LicheeRV-Nano | ~$133 | $30K/yr fish pond patrol |
 | **Green Thumb** | Soil + Temp/Humidity + Light + CO2 | LicheeRV-Nano | ~$95 | $18K/yr greenhouse attendant |
 | **Cold Chain** | DS18B20 + GPS + 4G | ESP32-S3 + PicClaw | ~$62 | $12K/yr cold chain inspector |
@@ -36,12 +36,15 @@ kits/dc-guardian/
 ├── WIRING.md           # Connection diagram (Fritzing + text)
 ├── wiring.fzz          # Fritzing source file
 ├── drivers/            # Sensor driver code
-│   ├── dht22.py
-│   ├── mq2_smoke.py
-│   └── water_leak.py
+│   ├── read_dht22.py
+│   ├── read_ds18b20.py
+│   ├── read_discrete.py
+│   └── read_sct013.py
 ├── skill.yaml          # PicClaw skill configuration
 ├── alerts.yaml         # Alert thresholds and escalation rules
-└── dashboard.json      # Grafana dashboard template (optional)
+├── TROUBLESHOOTING.md  # Edge-case diagnostic guide
+├── SAFETY.md           # Compliance and safety notes
+└── MAINTENANCE.md      # Long-term maintenance schedule
 ```
 
 ## How to Build
